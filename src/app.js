@@ -1,11 +1,11 @@
 import express from "express";
 import cors from "cors";
-import testRoutes from "./routes/avmg.js";
+import avmgRoutes from "./routes/avmg.js";
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
-app.use("/", testRoutes);
+app.use("/", avmgRoutes);
 
 export default app;
