@@ -1,4 +1,3 @@
-
 import dotenv from "dotenv";
 
 import { Worker } from "bullmq";
@@ -7,7 +6,7 @@ import { PrismaClient } from "@prisma/client";
 import { convertMedia } from "../services/mediaProcessor.js";
 import { downloadVideo } from "../services/downloader.js";
 import { cleanTranscript } from "../services/transcriptCleaner.js";
-
+import { transmitToCloud } from "../utils/supabaseUplink.js";
 import path from "path";
 
 dotenv.config();
@@ -29,10 +28,10 @@ const worker = new Worker(
       targetFormat,
       videoUrl,
       webhookUrl,
-      startTime, // 👈 Added
-      duration, // 👈 Added
-      watermarkPath, // 👈 Added
-      quality, // 👈 Added
+      startTime,
+      duration,
+      watermarkPath,
+      quality,
     } = job.data;
 
     console.log(`\n👨‍🍳 Worker picked up ticket: ${job.name}`);
@@ -62,8 +61,6 @@ const worker = new Worker(
         case "job-download":
           console.log("Initiating pure network pull...");
 
-          // 📦 1. We must destructure the object returned by the new downloader!
-          // We pass "mp4" as the targetFormat so the Ghost Protocol knows NOT to skip the video.
           const { videoPath: pureVideoPath } = await downloadVideo(
             videoUrl,
             "mp4",
@@ -76,13 +73,12 @@ const worker = new Worker(
             );
           }
 
-          // 2. Assign it to the final variable so the DB can save it
           finalFilePath = pureVideoPath;
           break;
+          
         case "job-download-convert":
           console.log("Combo Step 1: Downloading & Scraping Subs...");
 
-          // 👈 Pass targetFormat into the downloader!
           const { videoPath, subPath } = await downloadVideo(
             videoUrl,
             targetFormat,
@@ -103,7 +99,6 @@ const worker = new Worker(
             console.log("Skipping FFmpeg -> Sending Transcript directly!");
             finalFilePath = finalTranscriptPath;
           } else {
-            // Normal video/audio conversion routing
             console.log("Combo Step 2: Converting Media...");
             finalFilePath = await convertMedia(
               videoPath,
@@ -122,12 +117,15 @@ const worker = new Worker(
 
       const finalFileName = path.basename(finalFilePath);
 
-      // 4. Update the database to COMPLETED
+      // 🚀 THE UPLINK: Transmit to Supabase and get the public download link
+      const cloudUrl = await transmitToCloud(finalFilePath, finalFileName);
+
+      // 4. Update the database to COMPLETED with the CLOUD URL
       await prisma.mediaJob.update({
         where: { id: jobId },
         data: {
           status: "COMPLETED",
-          path: finalFilePath,
+          path: cloudUrl, // 👈 Saves the massive Supabase URL
           fileName: finalFileName,
         },
       });
@@ -144,7 +142,7 @@ const worker = new Worker(
               jobId: jobId,
               status: "COMPLETED",
               fileName: finalFileName,
-              downloadUrl: `http://localhost:5000/${finalFilePath}`,
+              downloadUrl: cloudUrl, // 👈 Send the cloud URL in the webhook
             }),
           });
           console.log("✅ Webhook delivered successfully!");
@@ -153,7 +151,7 @@ const worker = new Worker(
         }
       }
 
-      return finalFilePath;
+      return cloudUrl;
     } catch (error) {
       console.error(`❌ Job ${jobId} failed:`, error);
 
