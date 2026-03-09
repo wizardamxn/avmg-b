@@ -74,6 +74,8 @@ router.post("/download", express.json(), async (req, res) => {
     const webhookUrl = req.body.webhookUrl || null; // 👈 Grab it!
     const quality = req.body.quality || "best";
     const videoUrl = req.body.videoUrl;
+          const format = req.body.targetFormat || "mp3";
+
     const jobRecord = await prisma.mediaJob.create({
       data: {
         jobType: "job-download", // 👈 Tell the DB which engine we used
