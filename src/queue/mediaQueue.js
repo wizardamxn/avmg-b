@@ -1,12 +1,12 @@
-import { Queue } from 'bullmq';
+import { Queue } from "bullmq";
+import dotenv from "dotenv";
 
-// Connect to your Docker Redis instance
+dotenv.config();
+
 const redisConnection = {
-  host: '127.0.0.1',
-  port: 6379
+  url: process.env.REDIS_URL,
 };
 
-// Create the Queue (The Ticket Rail)
-export const mediaQueue = new Queue('MediaProcessingQueue', {
-  connection: redisConnection
+export const mediaQueue = new Queue("MediaProcessingQueue", {
+  connection: redisConnection,
 });

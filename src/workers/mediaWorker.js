@@ -1,4 +1,8 @@
+
+import dotenv from "dotenv";
+
 import { Worker } from "bullmq";
+
 import { PrismaClient } from "@prisma/client";
 import { convertMedia } from "../services/mediaProcessor.js";
 import { downloadVideo } from "../services/downloader.js";
@@ -6,8 +10,12 @@ import { cleanTranscript } from "../services/transcriptCleaner.js";
 
 import path from "path";
 
+dotenv.config();
+
 const prisma = new PrismaClient();
-const redisConnection = { host: "127.0.0.1", port: 6379 };
+const redisConnection = {
+  url: process.env.REDIS_URL,
+};
 
 console.log("👷 Media Worker is running and waiting for jobs...");
 
