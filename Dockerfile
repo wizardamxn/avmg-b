@@ -1,5 +1,5 @@
-# 1. Start with a lightweight Linux + Node environment
-FROM node:18-bullseye-slim
+# 1. Start with a modern Linux environment (Bookworm provides Python 3.11+)
+FROM node:20-bookworm-slim
 
 # 2. Install the heavy mutation engines (FFmpeg & Python)
 RUN apt-get update && apt-get install -y ffmpeg python3
