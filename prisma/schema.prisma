@@ -1,0 +1,54 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id    String  @id @default(uuid())
+  email String  @unique
+  name  String?
+  // Add any other fields you need for your users
+
+  mediaJobs MediaJob[] // Relation to MediaJob
+}
+
+model MediaJob {
+  id      String  @id @default(uuid())
+  userId  String? // Optional: Link to a User model if you have one
+  // ⚙️ THE NEW ENGINE TRACKER
+  jobType String  @default("unknown") // "job-convert", "job-download", "job-download-convert"
+
+  // 📦 YOUR EXISTING INPUTS
+  originalName String? // Local upload filename
+  url          String? // Network URL
+
+  // 🎛️ THE NEW PARAMETERS (For the Dashboard)
+  targetFormat String? // "mp3", "mp4", "txt", etc.
+  quality      String? // "best", "good", "draft"
+
+  // 📤 YOUR EXISTING OUTPUTS + TRANSCRIPT
+  fileName       String?
+  path           String?
+  size           Int?
+  transcriptPath String? // For the Ghost Protocol .txt files
+
+  // 🚥 YOUR EXISTING ENUM STATUS
+  status JobStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User?    @relation(fields: [userId], references: [id])
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
