@@ -63,13 +63,18 @@ export const convertMedia = (
     }
 
     // 📸 THE THUMBNAIL SNAPSHOT
-    if (targetFormat === "jpg" || targetFormat === "png") {
+    const isImage = targetFormat === "jpg" || targetFormat === "png";
+    if (isImage) {
       console.log(`📸 Snapping 1-frame thumbnail...`);
       command.outputOptions(["-vframes 1"]);
     }
 
+    // ffmpeg has no "jpg"/"png" muxer — use "image2" and let the .jpg/.png
+    // file extension pick the actual image codec.
+    const outputFormat = isImage ? "image2" : targetFormat;
+
     command
-      .toFormat(targetFormat)
+      .toFormat(outputFormat)
       .on("progress", (progress) => {
         console.log(
           `⏳ Processing: ${Math.round(progress.percent || 0)}% done`,

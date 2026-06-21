@@ -7,9 +7,13 @@ import { convertMedia } from "../services/mediaProcessor.js";
 import { downloadVideo } from "../services/downloader.js";
 import { cleanTranscript } from "../services/transcriptCleaner.js";
 import { transmitToCloud } from "../utils/supabaseUplink.js";
+import { startCleanupCron } from "../jobs/cleanupCron.js";
 import path from "path";
 
 dotenv.config();
+
+// 🧹 Arm the recurring bucket sweep (deletes expired Supabase files).
+startCleanupCron();
 
 const prisma = new PrismaClient();
 const redisConnection = {
@@ -115,7 +119,11 @@ const worker = new Worker(
           throw new Error("Unknown job type!");
       }
 
-      const finalFileName = path.basename(finalFilePath);
+      // Supabase storage keys reject characters like [ ] and spaces.
+      // Sanitize to letters/numbers/._- so the upload key is always valid.
+      const finalFileName = path
+        .basename(finalFilePath)
+        .replace(/[^a-zA-Z0-9._-]/g, "_");
 
       // 🚀 THE UPLINK: Transmit to Supabase and get the public download link
       const cloudUrl = await transmitToCloud(finalFilePath, finalFileName);
