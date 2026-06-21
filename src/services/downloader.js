@@ -24,6 +24,12 @@ export const downloadVideo = async (videoUrl, targetFormat = "mp4", quality = "b
     noPlaylist: true,
   };
 
+  // 🍪 Pass browser cookies so YouTube doesn't flag the server as a bot.
+  // Set YTDLP_COOKIES in .env to the path of a Netscape-format cookies.txt.
+  if (process.env.YTDLP_COOKIES) {
+    dlOptions.cookies = process.env.YTDLP_COOKIES; // -> --cookies <path>
+  }
+
   // 2. 👻 The Ghost Protocol Override
   if (isTranscriptOnly) {
     dlOptions.skipDownload = true; // Ignore the massive video
