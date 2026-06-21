@@ -6,6 +6,9 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
-app.use("/", avmgRoutes);
+
+// Mounted under /api so it matches the public path (nginx forwards
+// https://<domain>/api/* to this backend). Locally, call http://localhost:PORT/api/*.
+app.use("/api", avmgRoutes);
 
 export default app;
