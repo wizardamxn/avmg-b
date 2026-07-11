@@ -10,40 +10,50 @@ datasource db {
 }
 
 model User {
-  id    String  @id @default(uuid())
-  email String  @unique
-  name  String?
-  // Add any other fields you need for your users
+  id           String  @id @default(uuid())
+  email        String  @unique
+  name         String?
+  passwordHash String // bcrypt hash — never returned to clients
 
-  mediaJobs MediaJob[] // Relation to MediaJob
+  createdAt DateTime   @default(now())
+  mediaJobs MediaJob[]
 }
 
 model MediaJob {
-  id      String  @id @default(uuid())
-  userId  String? // Optional: Link to a User model if you have one
-  // ⚙️ THE NEW ENGINE TRACKER
-  jobType String  @default("unknown") // "job-convert", "job-download", "job-download-convert"
+  id     String  @id @default(uuid())
+  userId String? // set for registered users; null for guests
+  ip     String? // requester IP — powers guest daily quotas
 
-  // 📦 YOUR EXISTING INPUTS
-  originalName String? // Local upload filename
-  url          String? // Network URL
+  // ⚙️ Engine tracker: job-convert | job-download | job-download-convert | job-ai-notes
+  jobType String @default("unknown")
 
-  // 🎛️ THE NEW PARAMETERS (For the Dashboard)
-  targetFormat String? // "mp3", "mp4", "txt", etc.
-  quality      String? // "best", "good", "draft"
+  // 📦 Inputs
+  originalName String? // local upload filename
+  url          String? // network URL
 
-  // 📤 YOUR EXISTING OUTPUTS + TRANSCRIPT
+  // 🎛️ Parameters
+  targetFormat String? // mp3, mp4, txt, md, ...
+  quality      String? // best, good, draft
+
+  // 📤 Outputs
   fileName       String?
-  path           String?
-  size           Int?
-  transcriptPath String? // For the Ghost Protocol .txt files
+  path           String? // Supabase public URL (null once swept / for notes jobs)
+  size           Int? // bytes of the produced file
+  transcriptPath String?
+  notesMarkdown  String? @db.Text // AI study notes (markdown, stored in DB)
+  error          String? // human-readable failure reason
 
-  // 🚥 YOUR EXISTING ENUM STATUS
-  status JobStatus @default(PENDING)
+  // 🚥 State
+  status    JobStatus @default(PENDING)
+  expiresAt DateTime? // per-tier file expiry; cleanup sweeps past this
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([ip, createdAt])
+  @@index([status, expiresAt])
 }
 
 enum JobStatus {

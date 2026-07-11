@@ -1,55 +1,69 @@
 import dotenv from "dotenv";
-
 import { Worker } from "bullmq";
-
-import { PrismaClient } from "@prisma/client";
+import fs from "fs";
+import path from "path";
+import prisma from "../lib/prisma.js";
 import { convertMedia } from "../services/mediaProcessor.js";
 import { downloadVideo } from "../services/downloader.js";
-import { cleanTranscript } from "../services/transcriptCleaner.js";
+import { cleanTranscript, parseSubtitles } from "../services/transcriptCleaner.js";
+import { generateNotes } from "../services/notesGenerator.js";
 import { transmitToCloud } from "../utils/supabaseUplink.js";
 import { startCleanupCron } from "../jobs/cleanupCron.js";
-import path from "path";
 
 dotenv.config();
 
-// 🧹 Arm the recurring bucket sweep (deletes expired Supabase files).
+// 🧹 Arm the recurring bucket + local-uploads sweep.
 startCleanupCron();
 
-const prisma = new PrismaClient();
-const redisConnection = {
-  url: process.env.REDIS_URL,
-};
+const redisConnection = { url: process.env.REDIS_URL };
 
 console.log("👷 Media Worker is running and waiting for jobs...");
+
+const unlinkQuiet = async (p) => {
+  if (!p) return;
+  try {
+    await fs.promises.unlink(p);
+  } catch {
+    // already gone — fine
+  }
+};
+
+const fileSize = (p) => {
+  try {
+    return fs.statSync(p).size;
+  } catch {
+    return null;
+  }
+};
 
 const worker = new Worker(
   "MediaProcessingQueue",
   async (job) => {
-    // 1. 📦 EXTRACT ABSOLUTELY EVERYTHING FROM THE TICKET!
     const {
       jobId,
       inputPath,
       targetFormat,
       videoUrl,
-      webhookUrl,
       startTime,
       duration,
       watermarkPath,
       quality,
+      subtitlePath,
     } = job.data;
 
-    console.log(`\n👨‍🍳 Worker picked up ticket: ${job.name}`);
+    console.log(`\n👨‍🍳 Worker picked up: ${job.name} (${jobId})`);
 
-    // 2. Mark as processing
     await prisma.mediaJob.update({
       where: { id: jobId },
       data: { status: "PROCESSING" },
     });
 
-    let finalFilePath = "";
+    // Every temp file we touch — swept in the finally regardless of outcome.
+    const temps = [inputPath, watermarkPath, subtitlePath].filter(Boolean);
+    let finalFilePath = null; // → uploaded to Supabase
+    let notesMarkdown = null; // → stored in the DB, no upload
 
     try {
-      // 3. 🧠 THE SWITCHBOARD
       switch (job.name) {
         case "job-convert":
           finalFilePath = await convertMedia(
@@ -62,48 +76,24 @@ const worker = new Worker(
           );
           break;
 
-        case "job-download":
-          console.log("Initiating pure network pull...");
-
-          const { videoPath: pureVideoPath } = await downloadVideo(
-            videoUrl,
-            "mp4",
-            quality,
-          );
-
-          if (!pureVideoPath) {
-            throw new Error(
-              "System Failure: Network pull returned empty payload.",
-            );
-          }
-
-          finalFilePath = pureVideoPath;
+        case "job-download": {
+          const { videoPath } = await downloadVideo(videoUrl, "mp4", quality);
+          if (!videoPath) throw new Error("Network pull returned empty payload.");
+          finalFilePath = videoPath;
           break;
-          
-        case "job-download-convert":
-          console.log("Combo Step 1: Downloading & Scraping Subs...");
+        }
 
-          const { videoPath, subPath } = await downloadVideo(
-            videoUrl,
-            targetFormat,
-            quality,
-          );
+        case "job-download-convert": {
+          const { videoPath, subPath } = await downloadVideo(videoUrl, targetFormat, quality);
+          if (videoPath) temps.push(videoPath);
+          if (subPath) temps.push(subPath);
 
-          let finalTranscriptPath = null;
-          if (subPath) {
-            finalTranscriptPath = await cleanTranscript(subPath);
-          }
-
-          // 🛣️ THE BYPASS LANE
           if (targetFormat === "txt") {
-            if (!finalTranscriptPath)
-              throw new Error(
-                "No transcript could be extracted from this video.",
-              );
-            console.log("Skipping FFmpeg -> Sending Transcript directly!");
-            finalFilePath = finalTranscriptPath;
+            const transcriptPath = subPath ? await cleanTranscript(subPath) : null;
+            if (!transcriptPath)
+              throw new Error("No transcript could be extracted from this video.");
+            finalFilePath = transcriptPath;
           } else {
-            console.log("Combo Step 2: Converting Media...");
             finalFilePath = await convertMedia(
               videoPath,
               targetFormat,
@@ -114,69 +104,67 @@ const worker = new Worker(
             );
           }
           break;
+        }
+
+        case "job-ai-notes": {
+          let parsed;
+          if (subtitlePath) {
+            parsed = await parseSubtitles(subtitlePath);
+          } else {
+            const { subPath } = await downloadVideo(videoUrl, "txt", "best");
+            if (!subPath) throw new Error("No subtitles are available for this video.");
+            temps.push(subPath);
+            parsed = await parseSubtitles(subPath);
+          }
+          if (!parsed || !parsed.plainText)
+            throw new Error("Could not read the transcript.");
+          notesMarkdown = await generateNotes(parsed.timestampedText || parsed.plainText);
+          break;
+        }
 
         default:
           throw new Error("Unknown job type!");
       }
 
-      // Supabase storage keys reject characters like [ ] and spaces.
-      // Sanitize to letters/numbers/._- so the upload key is always valid.
-      const finalFileName = path
-        .basename(finalFilePath)
-        .replace(/[^a-zA-Z0-9._-]/g, "_");
-
-      // 🚀 THE UPLINK: Transmit to Supabase and get the public download link
-      const cloudUrl = await transmitToCloud(finalFilePath, finalFileName);
-
-      // 4. Update the database to COMPLETED with the CLOUD URL
-      await prisma.mediaJob.update({
-        where: { id: jobId },
-        data: {
-          status: "COMPLETED",
-          path: cloudUrl, // 👈 Saves the massive Supabase URL
-          fileName: finalFileName,
-        },
-      });
-
-      // 5. 🚀 THE WEBHOOK TRIGGER 🚀
-      if (webhookUrl) {
-        console.log(`📞 Calling Webhook: ${webhookUrl}`);
-        try {
-          await fetch(webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              event: "job.completed",
-              jobId: jobId,
-              status: "COMPLETED",
-              fileName: finalFileName,
-              downloadUrl: cloudUrl, // 👈 Send the cloud URL in the webhook
-            }),
-          });
-          console.log("✅ Webhook delivered successfully!");
-        } catch (webhookErr) {
-          console.error("⚠️ Failed to deliver webhook:", webhookErr.message);
-        }
+      // AI notes: store markdown in the DB, skip the cloud upload entirely.
+      if (notesMarkdown) {
+        await prisma.mediaJob.update({
+          where: { id: jobId },
+          data: { status: "COMPLETED", notesMarkdown, fileName: "study-notes.md" },
+        });
+        console.log(`✅ Notes job ${jobId} complete.`);
+        return "notes";
       }
 
+      // File-producing job: measure, upload, record. Supabase key must be safe.
+      const size = fileSize(finalFilePath);
+      const finalFileName = path.basename(finalFilePath).replace(/[^a-zA-Z0-9._-]/g, "_");
+      const cloudUrl = await transmitToCloud(finalFilePath, finalFileName);
+
+      await prisma.mediaJob.update({
+        where: { id: jobId },
+        data: { status: "COMPLETED", path: cloudUrl, fileName: finalFileName, size },
+      });
+
+      console.log(`✅ Job ${jobId} complete → ${cloudUrl}`);
       return cloudUrl;
     } catch (error) {
       console.error(`❌ Job ${jobId} failed:`, error);
-
-      await prisma.mediaJob.update({
-        where: { id: jobId },
-        data: { status: "FAILED" },
-      });
-
+      await prisma.mediaJob
+        .update({
+          where: { id: jobId },
+          data: { status: "FAILED", error: String(error?.message || error).slice(0, 500) },
+        })
+        .catch(() => {});
       throw error;
+    } finally {
+      // transmitToCloud already unlinks the uploaded file; sweep everything else
+      // (inputs, watermark, intermediate downloads, subtitle files).
+      await Promise.all(temps.map(unlinkQuiet));
     }
   },
   { connection: redisConnection },
 );
 
-worker.on("completed", (job) =>
-  console.log(`✅ Job ${job.id} officially done!`),
-);
-worker.on("failed", (job, err) =>
-  console.log(`🔥 Job ${job?.id} crashed: ${err.message}`),
-);
+worker.on("completed", (job) => console.log(`✅ Job ${job.id} officially done!`));
+worker.on("failed", (job, err) => console.log(`🔥 Job ${job?.id} crashed: ${err.message}`));

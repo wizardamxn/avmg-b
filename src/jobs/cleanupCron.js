@@ -1,7 +1,10 @@
 import cron from "node-cron";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
+import fs from "fs/promises";
+import path from "path";
 import prisma from "../lib/prisma.js";
+import { STORAGE_PREFIX } from "../utils/supabaseUplink.js";
 
 dotenv.config();
 
@@ -13,67 +16,90 @@ const supabase = createClient(
 
 const BUCKET = "avmg-payloads";
 
-// ⏳ How long a finished file is allowed to live before we sweep it.
+// Legacy fallback retention for rows created before per-tier expiresAt existed.
 const RETENTION_HOURS = Number(process.env.FILE_RETENTION_HOURS || 1);
 
-// 🕒 When the broom runs. Default: top of every hour. (min hour day month weekday)
+// 🕒 When the broom runs. Default: top of every hour.
 const CLEANUP_SCHEDULE = process.env.CLEANUP_CRON || "0 * * * *";
 
+// Delete local uploads/ files older than 24h — a safety net for temp files
+// that leaked because a job crashed before its finally-block ran.
+const sweepLocalUploads = async () => {
+  const dir = "uploads/";
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  let removed = 0;
+  try {
+    const names = await fs.readdir(dir);
+    for (const name of names) {
+      const fp = path.join(dir, name);
+      try {
+        const st = await fs.stat(fp);
+        if (st.isFile() && st.mtimeMs < cutoff) {
+          await fs.unlink(fp);
+          removed++;
+        }
+      } catch {
+        // file vanished between readdir and stat — ignore
+      }
+    }
+  } catch {
+    // uploads/ missing — nothing to do
+  }
+  if (removed) console.log(`🧹 [CLEANUP] Removed ${removed} stale local file(s).`);
+};
+
 /**
- * One sweep of the bucket: delete every COMPLETED file older than the
- * retention window, then mark its DB row as expired (path = null) so we
- * never look at it again.
+ * One sweep: delete every finished Supabase file past its expiry, mark its row
+ * as swept (path = null → "link expired"), then tidy stale local temp files.
  */
 export const runCleanup = async () => {
-  const cutoff = new Date(Date.now() - RETENTION_HOURS * 60 * 60 * 1000);
-  console.log(
-    `🧹 [CLEANUP] Sweeping files older than ${cutoff.toISOString()}...`,
-  );
+  const now = new Date();
+  const legacyCutoff = new Date(Date.now() - RETENTION_HOURS * 60 * 60 * 1000);
+  console.log(`🧹 [CLEANUP] Sweeping expired files @ ${now.toISOString()}...`);
 
-  // 1. Find finished files that are past their expiry and not yet purged.
-  //    path !== null  → still live in Supabase.  path === null  → already swept.
+  await sweepLocalUploads();
+
+  // Finished files still live in Supabase (path !== null) whose expiry passed.
   const expired = await prisma.mediaJob.findMany({
     where: {
       status: "COMPLETED",
-      createdAt: { lt: cutoff },
       path: { not: null },
       fileName: { not: null },
+      OR: [
+        { expiresAt: { lt: now } },
+        { expiresAt: null, createdAt: { lt: legacyCutoff } },
+      ],
     },
     select: { id: true, fileName: true },
   });
 
   if (expired.length === 0) {
-    console.log("🧹 [CLEANUP] Nothing to delete. Bucket is tidy.");
+    console.log("🧹 [CLEANUP] Bucket is tidy.");
     return;
   }
 
-  const fileNames = expired.map((j) => j.fileName);
-  console.log(
-    `🧹 [CLEANUP] Found ${fileNames.length} expired file(s). Deleting from Supabase...`,
-  );
+  // Only ever delete keys inside this project's folder in the shared bucket.
+  const storageKeys = expired.map((j) => STORAGE_PREFIX + j.fileName);
+  console.log(`🧹 [CLEANUP] Deleting ${storageKeys.length} expired file(s)...`);
 
-  // 2. Delete the actual objects from the bucket (accepts a batch of keys).
-  const { error } = await supabase.storage.from(BUCKET).remove(fileNames);
+  const { error } = await supabase.storage.from(BUCKET).remove(storageKeys);
   if (error) {
-    // Leave the rows untouched so the next run retries them.
+    // Leave rows untouched so the next run retries them.
     console.error("🧹 [CLEANUP_ERR] Supabase deletion failed:", error.message);
     return;
   }
 
-  // 3. Mark the rows as swept. Null path = "download link expired".
-  //    fileName is kept as a historical record of what the file was called.
+  // Null path = "download link expired"; fileName kept as a historical record.
   await prisma.mediaJob.updateMany({
     where: { id: { in: expired.map((j) => j.id) } },
     data: { path: null },
   });
 
-  console.log(
-    `✅ [CLEANUP] Removed ${fileNames.length} file(s) and tidied the database.`,
-  );
+  console.log(`✅ [CLEANUP] Removed ${storageKeys.length} file(s) and tidied the DB.`);
 };
 
 /**
- * Register the recurring sweep. Call this once when a long-running process boots.
+ * Register the recurring sweep. Call once when a long-running process boots.
  */
 export const startCleanupCron = () => {
   cron.schedule(CLEANUP_SCHEDULE, () => {
@@ -82,10 +108,10 @@ export const startCleanupCron = () => {
     );
   });
   console.log(
-    `🧹 Cleanup cron armed — schedule "${CLEANUP_SCHEDULE}", retention ${RETENTION_HOURS}h.`,
+    `🧹 Cleanup cron armed — schedule "${CLEANUP_SCHEDULE}", per-tier expiry (legacy ${RETENTION_HOURS}h).`,
   );
 
-  // Run one sweep on boot so a freshly-started server clears any backlog.
+  // One sweep on boot to clear any backlog.
   runCleanup().catch((err) =>
     console.error("🧹 [CLEANUP_ERR] Initial sweep crashed:", err.message),
   );

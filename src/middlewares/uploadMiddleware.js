@@ -1,31 +1,54 @@
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
+import multer from "multer";
+import fs from "fs";
+import { TIERS } from "../config/tiers.js";
 
-// 1. Ensure the uploads directory exists
-const uploadDir = 'uploads/';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
+const uploadDir = "uploads/";
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
-// 2. Configure the Storage Engine
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // Tell Multer to drop the file here
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    // 3. The Naming Strategy: Timestamp + Original Name
-    // This guarantees every single file name is unique
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const cleanName = file.originalname.replace(/\s+/g, '_'); // Replace spaces with underscores
-
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const cleanName = file.originalname.replace(/\s+/g, "_");
     cb(null, `${uniqueSuffix}-${cleanName}`);
-  }
+  },
 });
 
-// 4. Export the middleware, setting a 100MB file size limit for security
-export const upload = multer({
-  storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100 MB limit
-});
+// multer's fileSize limit is fixed per instance, so pre-build one per tier and
+// pick the right one at request time based on whether the user is logged in.
+const makeUploader = (maxBytes) => multer({ storage, limits: { fileSize: maxBytes } });
+const uploaders = {
+  GUEST: makeUploader(TIERS.GUEST.maxUploadBytes),
+  FREE: makeUploader(TIERS.FREE.maxUploadBytes),
+};
+
+// Dedicated 2 MB uploader for subtitle files (extension is validated in the route).
+const notesUploader = makeUploader(2 * 1024 * 1024);
+
+const mb = (bytes) => Math.round(bytes / (1024 * 1024));
+
+// Run a multer middleware and translate its errors into friendly JSON instead
+// of an unhandled 500.
+const run = (mw, req, res, next) =>
+  mw(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        const max = (req.user ? TIERS.FREE : TIERS.GUEST).maxUploadBytes;
+        return res.status(413).json({
+          error: "FILE_TOO_LARGE",
+          message: `File too large. Max ${mb(max)}MB${req.user ? "" : " for guests — sign up free for 100MB"}.`,
+        });
+      }
+      return res.status(400).json({ error: err.code, message: "Upload failed." });
+    }
+    if (err) return next(err);
+    next();
+  });
+
+// Tier-aware multipart upload. Requires optionalAuth to have run first.
+export const tierUpload = (fields) => (req, res, next) =>
+  run(uploaders[req.user ? "FREE" : "GUEST"].fields(fields), req, res, next);
+
+// Single 2 MB subtitle-file upload (field name "subtitleFile").
+export const notesUpload = (req, res, next) =>
+  run(notesUploader.single("subtitleFile"), req, res, next);

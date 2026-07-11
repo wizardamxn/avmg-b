@@ -1,178 +1,235 @@
 import express from "express";
-import { PrismaClient } from "@prisma/client";
-import { upload } from "../middlewares/uploadMiddleware.js";
+import fs from "fs/promises";
+import prisma from "../lib/prisma.js";
 import { mediaQueue } from "../queue/mediaQueue.js";
+import { optionalAuth, requireAuth } from "../middlewares/auth.js";
+import { enforceQuota } from "../middlewares/quota.js";
+import { tierUpload, notesUpload } from "../middlewares/uploadMiddleware.js";
+import { probeRemoteSize } from "../services/probe.js";
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
-// 🟢 ROUTE 1: Just Convert (Push Model)
-// 🟢 ROUTE 1: Just Convert (Push Model)
+const SUB_EXT = /\.(srt|vtt|txt)$/i;
+
+// File expiry stamped at creation → per-tier retention (guest 1h, account 24h).
+const expiryFor = (req) =>
+  new Date(Date.now() + (req.tier?.retentionHours ?? 1) * 60 * 60 * 1000);
+
+// Sweep any multer temp files if a handler fails before enqueuing.
+const cleanupFiles = async (req) => {
+  const files = req.files ? Object.values(req.files).flat() : [];
+  if (req.file) files.push(req.file);
+  await Promise.all(files.map((f) => fs.unlink(f.path).catch(() => {})));
+};
+
+// For guest URL jobs, reject oversized videos before spending bandwidth.
+const guestSizeGuard = async (req, res, videoUrl, verb) => {
+  if (req.user || !req.tier?.maxRemoteBytes) return false;
+  try {
+    const size = await probeRemoteSize(videoUrl);
+    if (size && size > req.tier.maxRemoteBytes) {
+      res.status(413).json({
+        error: "FILE_TOO_LARGE",
+        message: `That video is too large for guests (over ${Math.round(
+          req.tier.maxRemoteBytes / 1048576,
+        )}MB). Sign up free to ${verb} it.`,
+      });
+      return true;
+    }
+  } catch {
+    // Probe is flaky by nature — don't block on it.
+  }
+  return false;
+};
+
+// 🟢 ROUTE 1: Convert an uploaded file
 router.post(
   "/convert",
-  upload.fields([
+  optionalAuth,
+  enforceQuota("media"),
+  tierUpload([
     { name: "videoFile", maxCount: 1 },
     { name: "watermarkFile", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
-      // 1. Ensure the video file actually exists in the fields array
       if (!req.files || !req.files["videoFile"])
-        return res.status(400).json({ error: "No video file." });
+        return res.status(400).json({ error: "NO_FILE", message: "No video file." });
 
-      // 2. Safely extract our files
       const videoFile = req.files["videoFile"][0];
-      const watermarkFile = req.files["watermarkFile"]
-        ? req.files["watermarkFile"][0]
-        : null;
+      const watermarkFile = req.files["watermarkFile"] ? req.files["watermarkFile"][0] : null;
 
-      // 3. Grab all the text payload data
       const quality = req.body.quality || "best";
       const format = req.body.targetFormat || "mp3";
-      const webhookUrl = req.body.webhookUrl || null;
       const startTime = req.body.startTime || null;
       const duration = req.body.duration || null;
-      const videoUrl = req.body.videoUrl;
-      // 4. Create the DB Receipt
+
       const jobRecord = await prisma.mediaJob.create({
         data: {
-          jobType: "job-convert", // 👈 Tell the DB which engine we used
-          url: videoUrl, // 👈 Save the network link
-          targetFormat: format, // 👈 Save the format
-          quality: quality, // 👈 Save the quality
+          jobType: "job-convert",
+          userId: req.user?.id ?? null,
+          ip: req.ip,
+          originalName: videoFile.originalname,
+          targetFormat: format,
+          quality,
           status: "PENDING",
+          expiresAt: expiryFor(req),
         },
       });
 
-      // 5. Slap the ticket on the Redis rail!
       await mediaQueue.add("job-convert", {
         jobId: jobRecord.id,
-        inputPath: videoFile.path, // 👈 Safely using the extracted variable
+        inputPath: videoFile.path,
         targetFormat: format,
-        webhookUrl: webhookUrl,
-        startTime: startTime,
-        duration: duration,
-        watermarkPath: watermarkFile ? watermarkFile.path : null, // 👈 Safely using the extracted variable
-        quality: quality,
+        startTime,
+        duration,
+        watermarkPath: watermarkFile ? watermarkFile.path : null,
+        quality,
       });
 
-      res.status(200).json({
-        message: "Conversion job queued successfully!",
-        jobId: jobRecord.id,
-        status: "PENDING",
-      });
+      res.status(200).json({ message: "Conversion job queued.", jobId: jobRecord.id, status: "PENDING" });
     } catch (error) {
       console.error("Conversion Error:", error);
-      return res.status(500).json({ error: "Server error." });
+      await cleanupFiles(req);
+      return res.status(500).json({ error: "SERVER_ERROR", message: "Server error." });
     }
   },
 );
 
-// 🔵 ROUTE 2: Just Download (Pull Model)
-router.post("/download", express.json(), async (req, res) => {
-  try {
-    const webhookUrl = req.body.webhookUrl || null; // 👈 Grab it!
-    const quality = req.body.quality || "best";
-    const videoUrl = req.body.videoUrl;
-          const format = req.body.targetFormat || "mp3";
-
-    const jobRecord = await prisma.mediaJob.create({
-      data: {
-        jobType: "job-download", // 👈 Tell the DB which engine we used
-        url: videoUrl, // 👈 Save the network link
-        targetFormat: format, // 👈 Save the format
-        quality: quality, // 👈 Save the quality
-        status: "PENDING",
-      },
-    });
-
-    await mediaQueue.add("job-download", {
-      jobId: jobRecord.id,
-      videoUrl: videoUrl,
-      webhookUrl: webhookUrl, // 👈 Put it on the ticket!
-      quality: quality, // 👈 Put it on the ticket!
-    });
-
-    res.status(200).json({
-      message: "Download job queued successfully!",
-      jobId: jobRecord.id,
-      status: "PENDING",
-    });
-  } catch (error) {
-    console.error("Download Error:", error);
-    return res.status(500).json({ error: "Server error." });
-  }
-});
-
-// 🟣 ROUTE 3: The Combo (Download THEN Convert)
-router.post("/download-convert", express.json(), async (req, res) => {
+// 🔵 ROUTE 2: Download from a URL
+router.post("/download", optionalAuth, enforceQuota("media"), async (req, res) => {
   try {
     const quality = req.body.quality || "best";
     const format = req.body.targetFormat || "mp3";
-    const webhookUrl = req.body.webhookUrl || null; // 👈 Grab it!
-    const videoUrl = req.body.videoUrl; // 👈 Grab the video URL
+    const videoUrl = req.body.videoUrl;
+    if (!videoUrl) return res.status(400).json({ error: "NO_URL", message: "No video URL." });
 
-    console.log(
-      `Received download-convert request for URL: ${videoUrl} with target format: ${format}`,
-    );
+    if (await guestSizeGuard(req, res, videoUrl, "download")) return;
 
-    // 1. Create the database record WITH the new fields!
     const jobRecord = await prisma.mediaJob.create({
       data: {
-        jobType: "job-download-convert", // 👈 Tell the DB which engine we used
-        url: videoUrl, // 👈 Save the network link
-        targetFormat: format, // 👈 Save the format
-        quality: quality, // 👈 Save the quality
+        jobType: "job-download",
+        userId: req.user?.id ?? null,
+        ip: req.ip,
+        url: videoUrl,
+        targetFormat: format,
+        quality,
         status: "PENDING",
+        expiresAt: expiryFor(req),
+      },
+    });
+
+    await mediaQueue.add("job-download", { jobId: jobRecord.id, videoUrl, quality });
+    res.status(200).json({ message: "Download job queued.", jobId: jobRecord.id, status: "PENDING" });
+  } catch (error) {
+    console.error("Download Error:", error);
+    return res.status(500).json({ error: "SERVER_ERROR", message: "Server error." });
+  }
+});
+
+// 🟣 ROUTE 3: Download THEN convert
+router.post("/download-convert", optionalAuth, enforceQuota("media"), async (req, res) => {
+  try {
+    const quality = req.body.quality || "best";
+    const format = req.body.targetFormat || "mp3";
+    const videoUrl = req.body.videoUrl;
+    if (!videoUrl) return res.status(400).json({ error: "NO_URL", message: "No video URL." });
+
+    // Subtitle-only (txt) jobs are tiny — only guard real media pulls.
+    if (format !== "txt" && (await guestSizeGuard(req, res, videoUrl, "convert"))) return;
+
+    const jobRecord = await prisma.mediaJob.create({
+      data: {
+        jobType: "job-download-convert",
+        userId: req.user?.id ?? null,
+        ip: req.ip,
+        url: videoUrl,
+        targetFormat: format,
+        quality,
+        status: "PENDING",
+        expiresAt: expiryFor(req),
       },
     });
 
     await mediaQueue.add("job-download-convert", {
       jobId: jobRecord.id,
-      videoUrl: req.body.videoUrl,
+      videoUrl,
       targetFormat: format,
-      webhookUrl: webhookUrl, // 👈 Put it on the ticket!
-      quality: quality, // 👈 Put it on the ticket!
+      quality,
     });
-
-    res.status(200).json({
-      message: "Download and conversion job queued successfully!",
-      jobId: jobRecord.id,
-      status: "PENDING",
-    });
+    res.status(200).json({ message: "Download+convert job queued.", jobId: jobRecord.id, status: "PENDING" });
   } catch (error) {
     console.error("Download-Convert Error:", error);
-    return res.status(500).json({ error: "Server error." });
+    return res.status(500).json({ error: "SERVER_ERROR", message: "Server error." });
   }
 });
-// 🔍 ROUTE 4: Check Job Status
+
+// 🧠 ROUTE 4: AI Study Notes (accounts only)
+router.post("/notes", requireAuth, enforceQuota("notes"), notesUpload, async (req, res) => {
+  try {
+    const videoUrl = req.body.videoUrl ? String(req.body.videoUrl).trim() : null;
+    const subtitleFile = req.file || null;
+
+    if (!videoUrl && !subtitleFile)
+      return res.status(400).json({ error: "NO_INPUT", message: "Provide a video URL or a subtitle file." });
+
+    if (subtitleFile && !SUB_EXT.test(subtitleFile.originalname)) {
+      await fs.unlink(subtitleFile.path).catch(() => {});
+      return res.status(400).json({ error: "BAD_FILE", message: "Only .srt, .vtt, or .txt files." });
+    }
+
+    const jobRecord = await prisma.mediaJob.create({
+      data: {
+        jobType: "job-ai-notes",
+        userId: req.user.id,
+        ip: req.ip,
+        url: videoUrl,
+        originalName: subtitleFile?.originalname ?? null,
+        targetFormat: "md",
+        status: "PENDING",
+        expiresAt: expiryFor(req),
+      },
+    });
+
+    await mediaQueue.add("job-ai-notes", {
+      jobId: jobRecord.id,
+      videoUrl,
+      subtitlePath: subtitleFile?.path ?? null,
+    });
+
+    res.status(200).json({ message: "Notes job queued.", jobId: jobRecord.id, status: "PENDING" });
+  } catch (error) {
+    console.error("Notes Error:", error);
+    await cleanupFiles(req);
+    return res.status(500).json({ error: "SERVER_ERROR", message: "Server error." });
+  }
+});
+
+// 🔍 ROUTE 5: Check job status (public — the UUID is unguessable and guests
+// have no token, so they must be able to poll their own jobs).
 router.get("/status/:jobId", async (req, res) => {
   try {
-    const job = await prisma.mediaJob.findUnique({
-      where: { id: req.params.jobId },
-    });
-    if (!job) return res.status(404).json({ error: "Job not found" });
-
-    // Return the database row to the frontend!
+    const job = await prisma.mediaJob.findUnique({ where: { id: req.params.jobId } });
+    if (!job) return res.status(404).json({ error: "NOT_FOUND", message: "Job not found." });
     res.status(200).json(job);
   } catch (error) {
-    res.status(500).json({ error: "Database error" });
+    res.status(500).json({ error: "SERVER_ERROR", message: "Database error." });
   }
 });
 
-// Add this near your other routes in your Express server
-
-router.get("/jobs", async (req, res) => {
+// 📊 ROUTE 6: Job history (auth-scoped to the current user)
+router.get("/jobs", requireAuth, async (req, res) => {
   try {
-    // Fetch the 50 most recent jobs, newest first
     const jobs = await prisma.mediaJob.findMany({
+      where: { userId: req.user.id },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
     res.json(jobs);
   } catch (error) {
-    console.error("Failed to fetch telemetry:", error);
-    res.status(500).json({ error: "Failed to retrieve job history." });
+    console.error("Failed to fetch jobs:", error);
+    res.status(500).json({ error: "SERVER_ERROR", message: "Failed to retrieve job history." });
   }
 });
+
 export default router;
