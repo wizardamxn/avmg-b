@@ -9,7 +9,7 @@ app.disable("x-powered-by");
 
 // nginx fronts this in prod — trust it so req.ip is the real client IP
 // (used for guest quotas and rate limiting).
-app.set("trust proxy", 1);
+app.set("trust proxy", 2);
 
 // CORS allowlist. Auth uses a Bearer header (not cookies), so no credentials.
 // localhost:3000 is always allowed for local dev.
