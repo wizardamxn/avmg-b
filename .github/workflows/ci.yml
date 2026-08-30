@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches:[main]
+    branches: [main]
   pull_request:
-    branches:[main]
+    branches: [main]
 
 
 jobs:
@@ -13,4 +13,3 @@ jobs:
     steps:
       - name: Say hello
         run: echo "Shout, trust the process. You are gonna get it."
-        
