@@ -1,4 +1,4 @@
-node_modules
+**/node_modules
 # Keep environment variables out of version control
 .env
 .env.production
@@ -7,3 +7,6 @@ node_modules
 /src/generated/prisma
 
 /uploads
+
+cookies.txt
+.env*
