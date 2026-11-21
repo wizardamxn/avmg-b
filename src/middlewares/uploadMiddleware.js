@@ -33,7 +33,7 @@ const run = (mw, req, res, next) =>
         const max = (req.user ? TIERS.FREE : TIERS.GUEST).maxUploadBytes;
         return res.status(413).json({
           error: "FILE_TOO_LARGE",
-          message: `File too large. Max ${mb(max)}MB${req.user ? "" : " for guests — sign up free for 100MB"}.`,
+          message: `File too large. Max ${mb(max)}MB${req.user ? "" : ` for guests — sign up free for ${mb(TIERS.FREE.maxUploadBytes)}MB`}.`,
         });
       }
       return res.status(400).json({ error: err.code, message: "Upload failed." });
