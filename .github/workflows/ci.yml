@@ -26,6 +26,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # No test suite yet: at least catch syntax errors and an invalid Prisma schema.
+      - name: Check syntax and schema
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+        run: |
+          find src -name '*.js' -print0 | xargs -0 -n1 node --check
+          pnpm exec prisma validate
+
 
   docker-build:
     runs-on: ubuntu-latest
@@ -52,3 +60,38 @@ jobs:
           push: true
           tags: ghcr.io/wizardamxn/avmg-b:latest
 
+
+  deploy:
+    name: Deploy API to the phone
+    needs: [build]
+    # Only real pushes to main deploy; PRs just run the checks above.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger deploy and wait for the result
+        env:
+          SECRET: ${{ secrets.DEPLOY_SECRET }}
+          APP: avmg
+          SHA: ${{ github.sha }}
+          URL: https://deploy.amanahmad.xyz
+        run: |
+          # Every request is signed: HMAC-SHA256(secret, "<unix ts>.<message>")
+          sig() { printf '%s' "$1" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.*= //'; }
+          ts=$(date +%s)
+          res=$(curl -sS --fail-with-body -X POST "$URL/deploy/$APP" \
+            -H "content-type: application/json" -H "x-deploy-timestamp: $ts" \
+            -H "x-deploy-signature: $(sig "$ts.deploy.$APP.$SHA")" -d "{\"sha\":\"$SHA\"}")
+          id=$(echo "$res" | jq -r .id)
+          echo "Deploy $id queued on the phone"
+          for _ in $(seq 1 150); do
+            sleep 5
+            ts=$(date +%s)
+            st=$(curl -sS --fail-with-body "$URL/deploys/$id" -H "x-deploy-timestamp: $ts" \
+              -H "x-deploy-signature: $(sig "$ts.status.$id")") || continue
+            status=$(echo "$st" | jq -r .status)
+            if [ "$status" = queued ] || [ "$status" = running ]; then continue; fi
+            echo "$st" | jq -r .log
+            [ "$status" = succeeded ] && exit 0 || exit 1
+          done
+          echo "Timed out waiting for the phone"; exit 1
