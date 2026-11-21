@@ -6,7 +6,7 @@ dotenv.config();
 
 // Single-replica sweeper. Split out of mediaWorker.js so the media worker can
 // be scaled horizontally without multiplying the cleanup sweep — N copies would
-// race each other deleting the same Supabase objects and updating the same rows.
+// race each other deleting the same expired files and updating the same rows.
 //
 // This service must NEVER be scaled above 1 replica.
 startCleanupCron();

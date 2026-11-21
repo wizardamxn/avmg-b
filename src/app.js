@@ -1,8 +1,10 @@
 import express from "express";
 import cors from "cors";
+import path from "path";
 import rateLimit from "express-rate-limit";
 import avmgRoutes from "./routes/avmg.js";
 import authRoutes from "./routes/auth.js";
+import { OUTPUT_DIR } from "./utils/fileStore.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -34,6 +36,15 @@ const authLimiter = rateLimit({
 });
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
+// Finished files, streamed from disk as a download (supports Range/resume).
+// basename() strips any "../" so only files inside OUTPUT_DIR are reachable.
+app.get("/api/files/:name", (req, res) => {
+  const name = path.basename(req.params.name);
+  res.download(path.join(OUTPUT_DIR, name), name, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: "File expired or not found." });
+  });
+});
 
 // Mounted under /api so it matches the public path (nginx forwards
 // https://<domain>/api/* to this backend).

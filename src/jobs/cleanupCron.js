@@ -1,20 +1,11 @@
 import cron from "node-cron";
-import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import fs from "fs/promises";
 import path from "path";
 import prisma from "../lib/prisma.js";
-import { STORAGE_PREFIX } from "../utils/supabaseUplink.js";
+import { deletePublishedFile } from "../utils/fileStore.js";
 
 dotenv.config();
-
-// Same Supabase connection the uplink uses (service key = full admin rights)
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY,
-);
-
-const BUCKET = "avmg-payloads";
 
 // Legacy fallback retention for rows created before per-tier expiresAt existed.
 const RETENTION_HOURS = Number(process.env.FILE_RETENTION_HOURS || 1);
@@ -49,7 +40,7 @@ const sweepLocalUploads = async () => {
 };
 
 /**
- * One sweep: delete every finished Supabase file past its expiry, mark its row
+ * One sweep: delete every published file past its expiry, mark its row
  * as swept (path = null → "link expired"), then tidy stale local temp files.
  */
 export const runCleanup = async () => {
@@ -59,7 +50,7 @@ export const runCleanup = async () => {
 
   await sweepLocalUploads();
 
-  // Finished files still live in Supabase (path !== null) whose expiry passed.
+  // Finished files still published (path !== null) whose expiry passed.
   const expired = await prisma.mediaJob.findMany({
     where: {
       status: "COMPLETED",
@@ -74,28 +65,30 @@ export const runCleanup = async () => {
   });
 
   if (expired.length === 0) {
-    console.log("🧹 [CLEANUP] Bucket is tidy.");
+    console.log("🧹 [CLEANUP] Nothing expired.");
     return;
   }
 
-  // Only ever delete keys inside this project's folder in the shared bucket.
-  const storageKeys = expired.map((j) => STORAGE_PREFIX + j.fileName);
-  console.log(`🧹 [CLEANUP] Deleting ${storageKeys.length} expired file(s)...`);
+  console.log(`🧹 [CLEANUP] Deleting ${expired.length} expired file(s)...`);
 
-  const { error } = await supabase.storage.from(BUCKET).remove(storageKeys);
-  if (error) {
-    // Leave rows untouched so the next run retries them.
-    console.error("🧹 [CLEANUP_ERR] Supabase deletion failed:", error.message);
-    return;
+  // Only rows whose file is really gone get marked; failures retry next run.
+  const swept = [];
+  for (const j of expired) {
+    try {
+      await deletePublishedFile(j.fileName);
+      swept.push(j.id);
+    } catch (err) {
+      console.error(`🧹 [CLEANUP_ERR] Could not delete ${j.fileName}:`, err.message);
+    }
   }
 
   // Null path = "download link expired"; fileName kept as a historical record.
   await prisma.mediaJob.updateMany({
-    where: { id: { in: expired.map((j) => j.id) } },
+    where: { id: { in: swept } },
     data: { path: null },
   });
 
-  console.log(`✅ [CLEANUP] Removed ${storageKeys.length} file(s) and tidied the DB.`);
+  console.log(`✅ [CLEANUP] Removed ${swept.length} file(s) and tidied the DB.`);
 };
 
 /**

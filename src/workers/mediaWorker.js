@@ -7,13 +7,13 @@ import { convertMedia } from "../services/mediaProcessor.js";
 import { downloadVideo } from "../services/downloader.js";
 import { cleanTranscript, parseSubtitles } from "../services/transcriptCleaner.js";
 import { generateNotes } from "../services/notesGenerator.js";
-import { transmitToCloud } from "../utils/supabaseUplink.js";
+import { publishFile } from "../utils/fileStore.js";
 
 dotenv.config();
 
 // NOTE: the cleanup cron deliberately does NOT live here any more. This process
 // is horizontally scalable (`--scale worker=3`), and running the sweep inside it
-// would mean N concurrent sweeps deleting the same Supabase objects and racing
+// would mean N concurrent sweeps deleting the same expired files and racing
 // on the same rows. It now runs as its own single-replica `cleanup` service.
 
 const redisConnection = { url: process.env.REDIS_URL };
@@ -61,7 +61,7 @@ const worker = new Worker(
 
     // Every temp file we touch — swept in the finally regardless of outcome.
     const temps = [inputPath, watermarkPath, subtitlePath].filter(Boolean);
-    let finalFilePath = null; // → uploaded to Supabase
+    let finalFilePath = null; // → published to uploads/out (served by /api/files)
     let notesMarkdown = null; // → stored in the DB, no upload
 
     try {
@@ -137,18 +137,18 @@ const worker = new Worker(
         return "notes";
       }
 
-      // File-producing job: measure, upload, record. Supabase key must be safe.
+      // File-producing job: measure, publish, record. Name must be URL/path safe.
       const size = fileSize(finalFilePath);
       const finalFileName = path.basename(finalFilePath).replace(/[^a-zA-Z0-9._-]/g, "_");
-      const cloudUrl = await transmitToCloud(finalFilePath, finalFileName);
+      const fileUrl = await publishFile(finalFilePath, finalFileName);
 
       await prisma.mediaJob.update({
         where: { id: jobId },
-        data: { status: "COMPLETED", path: cloudUrl, fileName: finalFileName, size },
+        data: { status: "COMPLETED", path: fileUrl, fileName: finalFileName, size },
       });
 
-      console.log(`✅ Job ${jobId} complete → ${cloudUrl}`);
-      return cloudUrl;
+      console.log(`✅ Job ${jobId} complete → ${fileUrl}`);
+      return fileUrl;
     } catch (error) {
       console.error(`❌ Job ${jobId} failed:`, error);
       await prisma.mediaJob
@@ -159,7 +159,7 @@ const worker = new Worker(
         .catch(() => {});
       throw error;
     } finally {
-      // transmitToCloud already unlinks the uploaded file; sweep everything else
+      // publishFile already moved the output away; sweep everything else
       // (inputs, watermark, intermediate downloads, subtitle files).
       await Promise.all(temps.map(unlinkQuiet));
     }
