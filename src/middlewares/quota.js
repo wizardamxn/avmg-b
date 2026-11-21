@@ -1,26 +1,16 @@
 import { tierFor } from "../config/tiers.js";
-import { countJobsToday, countNotesToday } from "../lib/usage.js";
+import { countJobsToday } from "../lib/usage.js";
 
-// Enforce the per-tier daily quota BEFORE any heavy work (upload/download).
-// `kind`: "media" (convert/download) or "notes" (AI notes). Sets req.tier.
-// Must run after optionalAuth so req.user is populated.
-export const enforceQuota = (kind = "media") => async (req, res, next) => {
+// Enforce the per-tier daily job quota BEFORE any heavy work (upload/download).
+// Sets req.tier. Must run after optionalAuth so req.user is populated.
+// (The argument is the quota kind; "media" is the only one now that AI notes moved to Warden.)
+export const enforceQuota = (_kind = "media") => async (req, res, next) => {
   try {
     const tier = tierFor(req.user);
     req.tier = tier;
 
-    if (kind === "notes" && !req.user) {
-      return res.status(403).json({
-        error: "SIGNUP_REQUIRED",
-        message: "AI Study Notes needs a free account.",
-      });
-    }
-
-    const limit = kind === "notes" ? tier.aiNotesDaily : tier.dailyJobs;
-    const used =
-      kind === "notes"
-        ? await countNotesToday({ user: req.user, ip: req.ip })
-        : await countJobsToday({ user: req.user, ip: req.ip });
+    const limit = tier.dailyJobs;
+    const used = await countJobsToday({ user: req.user, ip: req.ip });
 
     if (used >= limit) {
       return res.status(429).json({

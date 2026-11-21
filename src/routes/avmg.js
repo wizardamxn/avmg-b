@@ -4,12 +4,12 @@ import prisma from "../lib/prisma.js";
 import { mediaQueue } from "../queue/mediaQueue.js";
 import { optionalAuth, requireAuth } from "../middlewares/auth.js";
 import { enforceQuota } from "../middlewares/quota.js";
-import { tierUpload, notesUpload } from "../middlewares/uploadMiddleware.js";
+import { tierUpload } from "../middlewares/uploadMiddleware.js";
 import { probeRemoteSize } from "../services/probe.js";
+import { probe, mediaSummary } from "../services/tools.js";
+import { compressOptions, audioOptions, frameOptions, editOptions, subtitleOptions } from "../lib/toolOptions.js";
 
 const router = express.Router();
-
-const SUB_EXT = /\.(srt|vtt|txt)$/i;
 
 // File expiry stamped at creation → per-tier retention (guest 1h, account 24h).
 const expiryFor = (req) =>
@@ -164,48 +164,94 @@ router.post("/download-convert", optionalAuth, enforceQuota("media"), async (req
   }
 });
 
-// 🧠 ROUTE 4: AI Study Notes (accounts only)
-router.post("/notes", requireAuth, enforceQuota("notes"), notesUpload, async (req, res) => {
-  try {
-    const videoUrl = req.body.videoUrl ? String(req.body.videoUrl).trim() : null;
-    const subtitleFile = req.file || null;
-
-    if (!videoUrl && !subtitleFile)
-      return res.status(400).json({ error: "NO_INPUT", message: "Provide a video URL or a subtitle file." });
-
-    if (subtitleFile && !SUB_EXT.test(subtitleFile.originalname)) {
-      await fs.unlink(subtitleFile.path).catch(() => {});
-      return res.status(400).json({ error: "BAD_FILE", message: "Only .srt, .vtt, or .txt files." });
+// 🧰 Upload tools: same shape for each — optional auth → daily quota → tier-sized
+// upload (field "file") → validate options → job row → queue. Options are
+// whitelisted in lib/toolOptions.js before they get anywhere near ffmpeg.
+const uploadTool = (jobType, validate) => [
+  optionalAuth,
+  enforceQuota("media"),
+  tierUpload([{ name: "file", maxCount: 1 }]),
+  async (req, res) => {
+    const file = req.files?.file?.[0];
+    try {
+      if (!file) return res.status(400).json({ error: "NO_FILE", message: "No file uploaded." });
+      const options = validate(req.body);
+      if (typeof options === "string") {
+        await cleanupFiles(req);
+        return res.status(400).json({ error: "BAD_OPTIONS", message: options });
+      }
+      const jobRecord = await prisma.mediaJob.create({
+        data: {
+          jobType,
+          userId: req.user?.id ?? null,
+          ip: req.ip,
+          originalName: file.originalname,
+          targetFormat: options.outputFormat,
+          status: "PENDING",
+          expiresAt: expiryFor(req),
+        },
+      });
+      await mediaQueue.add(jobType, { jobId: jobRecord.id, inputPath: file.path, options });
+      res.status(200).json({ message: "Job queued.", jobId: jobRecord.id, status: "PENDING" });
+    } catch (error) {
+      console.error(`${jobType} error:`, error);
+      await cleanupFiles(req);
+      return res.status(500).json({ error: "SERVER_ERROR", message: "Server error." });
     }
+  },
+];
+
+// 🗜️ ROUTE 4: Compress a video to fit a size (Discord 8 MB, WhatsApp 16 MB, ...)
+router.post("/compress", ...uploadTool("job-compress", compressOptions));
+// 🎚️ ROUTE 5: Audio cleanup — even out volume, cut silences, change speed
+router.post("/audio-clean", ...uploadTool("job-audio-clean", audioOptions));
+// 🖼️ ROUTE 6: Frame grabs — one still at a timestamp, or a contact sheet
+router.post("/frames", ...uploadTool("job-frames", frameOptions));
+// ✂️ ROUTE 7: Quick edits — rotate, flip, mute, speed
+router.post("/edit", ...uploadTool("job-edit", editOptions));
+
+// 📜 ROUTE 8: Subtitles / transcript from a link, without downloading the video
+router.post("/subtitles", optionalAuth, enforceQuota("media"), async (req, res) => {
+  try {
+    const videoUrl = req.body.videoUrl ? String(req.body.videoUrl).trim() : "";
+    if (!/^https?:\/\//i.test(videoUrl)) return res.status(400).json({ error: "NO_URL", message: "Paste a video link." });
+    const options = subtitleOptions(req.body);
+    if (typeof options === "string") return res.status(400).json({ error: "BAD_OPTIONS", message: options });
 
     const jobRecord = await prisma.mediaJob.create({
       data: {
-        jobType: "job-ai-notes",
-        userId: req.user.id,
+        jobType: "job-subtitles",
+        userId: req.user?.id ?? null,
         ip: req.ip,
         url: videoUrl,
-        originalName: subtitleFile?.originalname ?? null,
-        targetFormat: "md",
+        targetFormat: options.outputFormat,
         status: "PENDING",
         expiresAt: expiryFor(req),
       },
     });
-
-    await mediaQueue.add("job-ai-notes", {
-      jobId: jobRecord.id,
-      videoUrl,
-      subtitlePath: subtitleFile?.path ?? null,
-    });
-
-    res.status(200).json({ message: "Notes job queued.", jobId: jobRecord.id, status: "PENDING" });
+    await mediaQueue.add("job-subtitles", { jobId: jobRecord.id, videoUrl, options });
+    res.status(200).json({ message: "Subtitles job queued.", jobId: jobRecord.id, status: "PENDING" });
   } catch (error) {
-    console.error("Notes Error:", error);
-    await cleanupFiles(req);
+    console.error("Subtitles Error:", error);
     return res.status(500).json({ error: "SERVER_ERROR", message: "Server error." });
   }
 });
 
-// 🔍 ROUTE 5: Check job status (public — the UUID is unguessable and guests
+// 🔬 ROUTE 9: Media inspector — instant ffprobe summary; the upload is deleted
+// straight away. No queue and no daily quota: it's a few ms of work.
+router.post("/inspect", optionalAuth, tierUpload([{ name: "file", maxCount: 1 }]), async (req, res) => {
+  const file = req.files?.file?.[0];
+  if (!file) return res.status(400).json({ error: "NO_FILE", message: "No file uploaded." });
+  try {
+    res.json({ name: file.originalname, ...mediaSummary(await probe(file.path)) });
+  } catch {
+    res.status(422).json({ error: "UNREADABLE", message: "That doesn't look like an audio, video or image file." });
+  } finally {
+    await cleanupFiles(req);
+  }
+});
+
+// 🔍 ROUTE 10: Check job status (public — the UUID is unguessable and guests
 // have no token, so they must be able to poll their own jobs).
 router.get("/status/:jobId", async (req, res) => {
   try {
@@ -217,7 +263,7 @@ router.get("/status/:jobId", async (req, res) => {
   }
 });
 
-// 📊 ROUTE 6: Job history (auth-scoped to the current user)
+// 📊 ROUTE 11: Job history (auth-scoped to the current user)
 router.get("/jobs", requireAuth, async (req, res) => {
   try {
     const jobs = await prisma.mediaJob.findMany({

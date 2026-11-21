@@ -22,9 +22,6 @@ const uploaders = {
   FREE: makeUploader(TIERS.FREE.maxUploadBytes),
 };
 
-// Dedicated 2 MB uploader for subtitle files (extension is validated in the route).
-const notesUploader = makeUploader(2 * 1024 * 1024);
-
 const mb = (bytes) => Math.round(bytes / (1024 * 1024));
 
 // Run a multer middleware and translate its errors into friendly JSON instead
@@ -48,7 +45,3 @@ const run = (mw, req, res, next) =>
 // Tier-aware multipart upload. Requires optionalAuth to have run first.
 export const tierUpload = (fields) => (req, res, next) =>
   run(uploaders[req.user ? "FREE" : "GUEST"].fields(fields), req, res, next);
-
-// Single 2 MB subtitle-file upload (field name "subtitleFile").
-export const notesUpload = (req, res, next) =>
-  run(notesUploader.single("subtitleFile"), req, res, next);

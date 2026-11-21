@@ -11,37 +11,14 @@ export const startOfUtcDay = () => {
 // Registered users are scoped by userId; guests by IP (rows with no userId).
 const scope = ({ user, ip }) => (user ? { userId: user.id } : { ip, userId: null });
 
-// General job count for the day EXCLUDING AI-notes jobs, so notes have their
-// own independent budget and don't silently eat the media job allowance.
+// Every tool job counts toward the same daily allowance.
 export const countJobsToday = ({ user, ip }) =>
   prisma.mediaJob.count({
-    where: {
-      createdAt: { gte: startOfUtcDay() },
-      jobType: { not: "job-ai-notes" },
-      ...scope({ user, ip }),
-    },
-  });
-
-export const countNotesToday = ({ user, ip }) =>
-  prisma.mediaJob.count({
-    where: {
-      createdAt: { gte: startOfUtcDay() },
-      jobType: "job-ai-notes",
-      ...scope({ user, ip }),
-    },
+    where: { createdAt: { gte: startOfUtcDay() }, ...scope({ user, ip }) },
   });
 
 // Snapshot used by GET /auth/me and the quota UI.
 export const getUsage = async ({ user, ip }) => {
   const tier = tierFor(user);
-  const [jobsUsed, notesUsed] = await Promise.all([
-    countJobsToday({ user, ip }),
-    countNotesToday({ user, ip }),
-  ]);
-  return {
-    jobsUsed,
-    jobsLimit: tier.dailyJobs,
-    notesUsed,
-    notesLimit: tier.aiNotesDaily,
-  };
+  return { jobsUsed: await countJobsToday({ user, ip }), jobsLimit: tier.dailyJobs };
 };

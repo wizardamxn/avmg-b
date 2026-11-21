@@ -5,8 +5,8 @@ import path from "path";
 import prisma from "../lib/prisma.js";
 import { convertMedia } from "../services/mediaProcessor.js";
 import { downloadVideo } from "../services/downloader.js";
-import { cleanTranscript, parseSubtitles } from "../services/transcriptCleaner.js";
-import { generateNotes } from "../services/notesGenerator.js";
+import { cleanTranscript } from "../services/transcriptCleaner.js";
+import { compressToSize, cleanAudio, grabFrames, quickEdit, subtitlesAs } from "../services/tools.js";
 import { publishFile } from "../utils/fileStore.js";
 
 dotenv.config();
@@ -49,7 +49,7 @@ const worker = new Worker(
       duration,
       watermarkPath,
       quality,
-      subtitlePath,
+      options,
     } = job.data;
 
     console.log(`\n👨‍🍳 Worker picked up: ${job.name} (${jobId})`);
@@ -60,9 +60,8 @@ const worker = new Worker(
     });
 
     // Every temp file we touch — swept in the finally regardless of outcome.
-    const temps = [inputPath, watermarkPath, subtitlePath].filter(Boolean);
+    const temps = [inputPath, watermarkPath].filter(Boolean);
     let finalFilePath = null; // → published to uploads/out (served by /api/files)
-    let notesMarkdown = null; // → stored in the DB, no upload
 
     try {
       switch (job.name) {
@@ -107,34 +106,33 @@ const worker = new Worker(
           break;
         }
 
-        case "job-ai-notes": {
-          let parsed;
-          if (subtitlePath) {
-            parsed = await parseSubtitles(subtitlePath);
-          } else {
-            const { subPath } = await downloadVideo(videoUrl, "txt", "best");
-            if (!subPath) throw new Error("No subtitles are available for this video.");
-            temps.push(subPath);
-            parsed = await parseSubtitles(subPath);
-          }
-          if (!parsed || !parsed.plainText)
-            throw new Error("Could not read the transcript.");
-          notesMarkdown = await generateNotes(parsed.timestampedText || parsed.plainText);
+        case "job-compress":
+          finalFilePath = await compressToSize(inputPath, options.targetMB);
+          break;
+
+        case "job-audio-clean":
+          finalFilePath = await cleanAudio(inputPath, options);
+          break;
+
+        case "job-frames":
+          finalFilePath = await grabFrames(inputPath, options);
+          break;
+
+        case "job-edit":
+          finalFilePath = await quickEdit(inputPath, options);
+          break;
+
+        case "job-subtitles": {
+          // Subtitle-only pull: yt-dlp skips the video entirely (~KBs instead of the whole file).
+          const { subPath } = await downloadVideo(videoUrl, "txt", "best");
+          if (!subPath) throw new Error("This video has no English subtitles.");
+          temps.push(subPath);
+          finalFilePath = await subtitlesAs(subPath, options.format);
           break;
         }
 
         default:
           throw new Error("Unknown job type!");
-      }
-
-      // AI notes: store markdown in the DB, skip the cloud upload entirely.
-      if (notesMarkdown) {
-        await prisma.mediaJob.update({
-          where: { id: jobId },
-          data: { status: "COMPLETED", notesMarkdown, fileName: "study-notes.md" },
-        });
-        console.log(`✅ Notes job ${jobId} complete.`);
-        return "notes";
       }
 
       // File-producing job: measure, publish, record. Name must be URL/path safe.

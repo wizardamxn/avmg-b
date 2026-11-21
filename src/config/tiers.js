@@ -7,7 +7,6 @@ export const TIERS = {
     maxUploadBytes: 5 * 1024 * 1024, // 5 MB uploads
     maxRemoteBytes: 50 * 1024 * 1024, // 50 MB cap on URL downloads (probed)
     dailyJobs: 3,
-    aiNotesDaily: 0, // AI notes locked for guests
     retentionHours: 1,
   },
   FREE: {
@@ -15,7 +14,6 @@ export const TIERS = {
     maxUploadBytes: 100 * 1024 * 1024, // 100 MB uploads
     maxRemoteBytes: null, // no probe cap
     dailyJobs: 20,
-    aiNotesDaily: 5,
     retentionHours: 24,
   },
 };
