@@ -4,7 +4,7 @@ import path from "path";
 import rateLimit from "express-rate-limit";
 import avmgRoutes from "./routes/avmg.js";
 import authRoutes from "./routes/auth.js";
-import { OUTPUT_DIR } from "./utils/fileStore.js";
+import { publishedPath } from "./utils/fileStore.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -37,11 +37,13 @@ const authLimiter = rateLimit({
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
-// Finished files, streamed from disk as a download (supports Range/resume).
-// basename() strips any "../" so only files inside OUTPUT_DIR are reachable.
-app.get("/api/files/:name", (req, res) => {
-  const name = path.basename(req.params.name);
-  res.download(path.join(OUTPUT_DIR, name), name, (err) => {
+// Finished files, streamed from disk as a download (supports Range/resume), saved
+// under their friendly name. Only a real job id + basename is accepted, so
+// "../" tricks can't reach anything outside the published folder.
+app.get("/api/files/:jobId/:name", (req, res) => {
+  const file = publishedPath(req.params.jobId, req.params.name);
+  if (!file) return res.status(404).json({ error: "File expired or not found." });
+  res.download(file, path.basename(req.params.name), (err) => {
     if (err && !res.headersSent) res.status(404).json({ error: "File expired or not found." });
   });
 });

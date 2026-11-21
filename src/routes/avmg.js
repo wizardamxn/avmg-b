@@ -80,6 +80,7 @@ router.post(
       await mediaQueue.add("job-convert", {
         jobId: jobRecord.id,
         inputPath: videoFile.path,
+        originalName: videoFile.originalname,
         targetFormat: format,
         startTime,
         duration,
@@ -191,7 +192,7 @@ const uploadTool = (jobType, validate) => [
           expiresAt: expiryFor(req),
         },
       });
-      await mediaQueue.add(jobType, { jobId: jobRecord.id, inputPath: file.path, options });
+      await mediaQueue.add(jobType, { jobId: jobRecord.id, inputPath: file.path, originalName: file.originalname, options });
       res.status(200).json({ message: "Job queued.", jobId: jobRecord.id, status: "PENDING" });
     } catch (error) {
       console.error(`${jobType} error:`, error);

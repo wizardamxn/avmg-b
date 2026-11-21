@@ -22,6 +22,9 @@ export const downloadVideo = async (videoUrl, targetFormat = "mp4", quality = "b
     mergeOutputFormat: "mp4", 
     noWarnings: true,         
     noPlaylist: true,
+    // Print the title (for a friendly download name) while still downloading.
+    print: "%(title)s",
+    noSimulate: true,
   };
 
   // 🍪 Pass browser cookies so YouTube doesn't flag the server as a bot.
@@ -38,8 +41,9 @@ export const downloadVideo = async (videoUrl, targetFormat = "mp4", quality = "b
     dlOptions.subLangs = "en";
   }
 
-  // 3. Fire the engine
-  await youtubedl(videoUrl, dlOptions);
+  // 3. Fire the engine (stdout is the printed title)
+  const printed = await youtubedl(videoUrl, dlOptions);
+  const title = String(printed ?? "").trim().split(/\r?\n/).pop() || null;
 
   // 4. Check for subtitles ONLY if we were looking for them
   let validSubPath = null;
@@ -54,5 +58,5 @@ export const downloadVideo = async (videoUrl, targetFormat = "mp4", quality = "b
     }
   }
 
-  return { videoPath: isTranscriptOnly ? null : outputPath, subPath: validSubPath }; 
+  return { videoPath: isTranscriptOnly ? null : outputPath, subPath: validSubPath, title }; 
 };

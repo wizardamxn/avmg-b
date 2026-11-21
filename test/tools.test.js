@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { videoKbpsFor, maxHeightFor, atempoChain, audioFilters, editFilters, mediaSummary } from "../src/services/tools.js";
+import { safeName, clockLabel, downloadName } from "../src/lib/fileNames.js";
 import { parseTimestamp, compressOptions, audioOptions, frameOptions, editOptions, subtitleOptions } from "../src/lib/toolOptions.js";
 
 test("videoKbpsFor fits the target size", () => {
@@ -89,4 +90,21 @@ test("mediaSummary pulls codec, size and fps out of ffprobe output", () => {
     video: { codec: "h264", width: 1920, height: 1080, fps: 29.97 },
     audio: { codec: "aac", sampleRate: 48000, channels: 2 },
   });
+});
+
+test("download names are friendly and filesystem-safe", () => {
+  assert.equal(safeName('my:video/"final"?.mp4'), "my video final .mp4");
+  assert.equal(safeName("../../etc/passwd"), "etc passwd");
+  assert.equal(safeName("   "), "avmg-file");
+  assert.equal(safeName("a".repeat(200)).length, 90);
+  assert.equal(clockLabel(83), "1m23s");
+  assert.equal(clockLabel(3725), "1h02m05s");
+  assert.equal(clockLabel(7), "7s");
+  assert.equal(downloadName("job-compress", { source: "holiday.MOV", options: { targetMB: 8 } }, ".mp4"), "holiday (8 MB).mp4");
+  assert.equal(downloadName("job-audio-clean", { source: "lecture 3.m4a", options: {} }, ".mp3"), "lecture 3 (clean).mp3");
+  assert.equal(downloadName("job-frames", { source: "talk.mp4", options: { mode: "single", at: 83 } }, ".jpg"), "talk (at 1m23s).jpg");
+  assert.equal(downloadName("job-frames", { source: "talk.mp4", options: { mode: "sheet" } }, ".png"), "talk (contact sheet).png");
+  assert.equal(downloadName("job-subtitles", { source: "Me at the zoo", options: { format: "txt" } }, ".txt"), "Me at the zoo (transcript).txt");
+  assert.equal(downloadName("job-download", { source: "Me at the zoo" }, ".mp4"), "Me at the zoo.mp4");
+  assert.equal(downloadName("job-convert", { source: null }, ".mp3"), "avmg.mp3");
 });

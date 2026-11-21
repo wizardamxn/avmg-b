@@ -75,7 +75,7 @@ export const runCleanup = async () => {
   const swept = [];
   for (const j of expired) {
     try {
-      await deletePublishedFile(j.fileName);
+      await deletePublishedFile(j.id, j.fileName);
       swept.push(j.id);
     } catch (err) {
       console.error(`🧹 [CLEANUP_ERR] Could not delete ${j.fileName}:`, err.message);

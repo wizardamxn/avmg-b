@@ -8,6 +8,7 @@ import { downloadVideo } from "../services/downloader.js";
 import { cleanTranscript } from "../services/transcriptCleaner.js";
 import { compressToSize, cleanAudio, grabFrames, quickEdit, subtitlesAs } from "../services/tools.js";
 import { publishFile } from "../utils/fileStore.js";
+import { downloadName } from "../lib/fileNames.js";
 
 dotenv.config();
 
@@ -50,6 +51,7 @@ const worker = new Worker(
       watermarkPath,
       quality,
       options,
+      originalName,
     } = job.data;
 
     console.log(`\n👨‍🍳 Worker picked up: ${job.name} (${jobId})`);
@@ -61,7 +63,8 @@ const worker = new Worker(
 
     // Every temp file we touch — swept in the finally regardless of outcome.
     const temps = [inputPath, watermarkPath].filter(Boolean);
-    let finalFilePath = null; // → published to uploads/out (served by /api/files)
+    let finalFilePath = null; // → published to uploads/out/<jobId> (served by /api/files)
+    let title = null; // video title for link jobs → friendly download name
 
     try {
       switch (job.name) {
@@ -77,14 +80,16 @@ const worker = new Worker(
           break;
 
         case "job-download": {
-          const { videoPath } = await downloadVideo(videoUrl, "mp4", quality);
+          const { videoPath, title: t } = await downloadVideo(videoUrl, "mp4", quality);
           if (!videoPath) throw new Error("Network pull returned empty payload.");
+          title = t;
           finalFilePath = videoPath;
           break;
         }
 
         case "job-download-convert": {
-          const { videoPath, subPath } = await downloadVideo(videoUrl, targetFormat, quality);
+          const { videoPath, subPath, title: t } = await downloadVideo(videoUrl, targetFormat, quality);
+          title = t;
           if (videoPath) temps.push(videoPath);
           if (subPath) temps.push(subPath);
 
@@ -124,8 +129,9 @@ const worker = new Worker(
 
         case "job-subtitles": {
           // Subtitle-only pull: yt-dlp skips the video entirely (~KBs instead of the whole file).
-          const { subPath } = await downloadVideo(videoUrl, "txt", "best");
+          const { subPath, title: t } = await downloadVideo(videoUrl, "txt", "best");
           if (!subPath) throw new Error("This video has no English subtitles.");
+          title = t;
           temps.push(subPath);
           finalFilePath = await subtitlesAs(subPath, options.format);
           break;
@@ -135,10 +141,10 @@ const worker = new Worker(
           throw new Error("Unknown job type!");
       }
 
-      // File-producing job: measure, publish, record. Name must be URL/path safe.
+      // Measure, publish under a friendly name ("holiday (8 MB).mp4"), record.
       const size = fileSize(finalFilePath);
-      const finalFileName = path.basename(finalFilePath).replace(/[^a-zA-Z0-9._-]/g, "_");
-      const fileUrl = await publishFile(finalFilePath, finalFileName);
+      const finalFileName = downloadName(job.name, { source: originalName || title, options }, path.extname(finalFilePath));
+      const fileUrl = await publishFile(finalFilePath, jobId, finalFileName);
 
       await prisma.mediaJob.update({
         where: { id: jobId },
