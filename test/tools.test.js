@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { videoKbpsFor, maxHeightFor, atempoChain, audioFilters, editFilters, mediaSummary } from "../src/services/tools.js";
+import { ffmpegThreads } from "../src/services/ffmpegCpu.js";
 import { safeName, clockLabel, downloadName } from "../src/lib/fileNames.js";
 import { parseTimestamp, compressOptions, audioOptions, frameOptions, editOptions, subtitleOptions } from "../src/lib/toolOptions.js";
 
@@ -107,4 +108,14 @@ test("download names are friendly and filesystem-safe", () => {
   assert.equal(downloadName("job-subtitles", { source: "Me at the zoo", options: { format: "txt" } }, ".txt"), "Me at the zoo (transcript).txt");
   assert.equal(downloadName("job-download", { source: "Me at the zoo" }, ".mp4"), "Me at the zoo.mp4");
   assert.equal(downloadName("job-convert", { source: null }, ".mp3"), "avmg.mp3");
+});
+test("ffmpeg thread cap defaults to 2 and accepts an override", () => {
+  const prev = process.env.FFMPEG_THREADS;
+  delete process.env.FFMPEG_THREADS;
+  assert.equal(ffmpegThreads(), 2);
+  process.env.FFMPEG_THREADS = "4";
+  assert.equal(ffmpegThreads(), 4);
+  process.env.FFMPEG_THREADS = "junk";
+  assert.equal(ffmpegThreads(), 2);
+  if (prev === undefined) delete process.env.FFMPEG_THREADS; else process.env.FFMPEG_THREADS = prev;
 });

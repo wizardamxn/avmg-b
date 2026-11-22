@@ -1,6 +1,7 @@
 import ffmpeg from "fluent-ffmpeg";
 import fs from "fs/promises";
 import path from "path";
+import { limitCpu } from "./ffmpegCpu.js";
 
 export const convertMedia = (
   inputPath,
@@ -73,7 +74,7 @@ export const convertMedia = (
     // file extension pick the actual image codec.
     const outputFormat = isImage ? "image2" : targetFormat;
 
-    command
+    limitCpu(command)
       .toFormat(outputFormat)
       .on("progress", (progress) => {
         console.log(

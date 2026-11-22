@@ -1,6 +1,7 @@
 import ffmpeg from "fluent-ffmpeg";
 import path from "path";
 import { cleanTranscript } from "./transcriptCleaner.js";
+import { limitCpu } from "./ffmpegCpu.js";
 
 // ffmpeg recipes for the newer tools. Options arrive already validated
 // (src/lib/toolOptions.js); the pure helpers below are unit-tested.
@@ -92,7 +93,7 @@ const outPath = (input, suffix, ext) => {
 
 const run = (command, output) =>
   new Promise((resolve, reject) => {
-    command.on("error", reject).on("end", () => resolve(output)).save(output);
+    limitCpu(command).on("error", reject).on("end", () => resolve(output)).save(output);
   });
 
 export const probe = (file) =>
