@@ -16,6 +16,13 @@ model User {
   name         String?
   passwordHash String // bcrypt hash — never returned to clients
 
+  // false = signed up but hasn't entered the emailed code yet (existing users default to true)
+  emailVerified Boolean   @default(true)
+  otpHash       String? // HMAC of the 6-digit code, never the code itself
+  otpExpires    DateTime?
+  otpAttempts   Int       @default(0)
+  otpSentAt     DateTime?
+
   createdAt DateTime   @default(now())
   mediaJobs MediaJob[]
 }
